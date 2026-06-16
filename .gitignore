@@ -1,0 +1,9 @@
+
+# Ignore environment variable files
+# Matches files like: .env, .env.local, .env.production, any file starting with .env
+.env*
+
+# Also ignore any files that end with the extension .env (e.g. config.env)
+*.env
+
+*.spotify_cache
