@@ -13,6 +13,7 @@ import numpy as np
 import platform
 import time
 import requests
+import subprocess
 
 from dataclasses import dataclass, field
 from collections import deque
@@ -26,6 +27,11 @@ import pylrc
 
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
+
+import qrcode
+from qrcode.image.styledpil import StyledPilImage
+from qrcode.image.styles.moduledrawers.pil import RoundedModuleDrawer
+from qrcode.image.styles.colormasks import SolidFillColorMask
 
 DO_LYRIC_FETCHING = True
 
@@ -226,9 +232,10 @@ class AppState:
     next_artist:      str = ""
     next_album:       str = ""
 
-    song_skip: bool = True
+    do_quick_info: bool = True
+    request_info: bool = False
 
-    # jam_url: str = True
+    jam_url: str = "https://pbs.twimg.com/media/G3pBT_PXkAAyVDC.jpg"
 
 
     def __str__(self):
@@ -491,6 +498,52 @@ class Visualizer(mglw.WindowConfig):
         except Exception:
             font_large = font_medium = font_small = ImageFont.load_default()
 
+        # QR-Code erzeugen und gestalterisch aufbereiten
+        qr = qrcode.QRCode(
+            version=None,
+            error_correction=qrcode.constants.ERROR_CORRECT_H,
+            box_size=10,
+            border=2,
+        )
+
+        try:
+            qr.add_data(self.state.jam_url)
+            qr.make(fit=True)
+        except:
+            qr.add_data("https://pbs.twimg.com/media/G3pBT_PXkAAyVDC.jpg")
+            qr.make(fit=True)
+
+        qr_img = qr.make_image(
+            image_factory=StyledPilImage,
+            module_drawer=RoundedModuleDrawer(),
+            color_mask=SolidFillColorMask(
+                front_color=(200, 200, 220),
+                back_color=(20, 20, 30),
+            ),
+        ).convert("RGBA")
+        
+
+        # Größe auf der rechten Seite bestimmen
+        qr_size = 260
+        qr_img = qr_img.resize((qr_size, qr_size), Image.LANCZOS)
+
+        # Dezente Transparenz, damit sich der Code einfügt
+        alpha = qr_img.split()[3].point(lambda a: int(a * 0.85))
+        qr_img.putalpha(alpha)
+
+        margin = 100
+        qr_x = 1920 - qr_size - margin
+        qr_y = int((1080 - qr_size) * .9)
+        img.alpha_composite(qr_img, (qr_x, qr_y))
+
+        # Next song in bottom right
+        next_name, next_artist, next_album = self.get_next_track_info()
+        if next_name != track_name:
+            font_next = ImageFont.truetype("/System/Library/Fonts/Avenir Next.ttc", 24)
+            next_text = f"Next: {next_name[:30]} by {next_artist[:20]}"
+            draw.text((1920 - margin + 20, 1080 - 40), next_text, font=font_next,
+                      fill=(140, 140, 160, 120), anchor="rm")
+
         cx = 960
         draw.text((cx, 420), track_name, font=font_large,
                   fill=(255, 255, 255, 255), anchor="mm")
@@ -515,6 +568,37 @@ class Visualizer(mglw.WindowConfig):
 
         img = img.transpose(Image.FLIP_TOP_BOTTOM)
         self.overlay_tex.write(img.tobytes())
+
+    # ─── jam ────────────────────────────────────────────────────────────
+
+    def set_new_jam_key(self):
+        def set_j(self):
+            prompt = "Please enter jam url:"
+            skript = (
+                f'display dialog "{prompt}" default answer "{self.state.jam_url}" '
+                f'buttons {{"Cancel", "OK"}} default button "OK"\n'
+                f'return text returned of result'
+            )
+
+            result = subprocess.run(
+                ["osascript", "-e", skript],
+                capture_output=True,
+                text=True
+            )
+
+            if result.returncode != 0:
+                return
+
+            link = result.stdout.strip()
+
+            if not link:
+                return
+
+            self.state.jam_url = link
+
+            self.state.request_info = True
+
+        threading.Thread(target=set_j, daemon=True, name="jam key popup", args=[self]).start()
 
     # ─── info trigger ─────────────────────────────────────────────
 
@@ -549,10 +633,10 @@ class Visualizer(mglw.WindowConfig):
         total   = self.info_duration + self.fade_duration * 2
         if elapsed > total:
             self.info_active = False
-            self.state.song_skip = False
+            self.state.do_quick_info = False
             return 0.0
         if elapsed < self.fade_duration:
-            return 1.0 if self.state.song_skip else elapsed / self.fade_duration
+            return 1.0 if self.state.do_quick_info else elapsed / self.fade_duration
         if elapsed < self.fade_duration + self.info_duration:
             return 1.0
         return 1.0 - (elapsed - self.fade_duration - self.info_duration) / self.fade_duration
@@ -616,11 +700,15 @@ class Visualizer(mglw.WindowConfig):
             self.trigger_info()
 
         elif self.state.is_new_song:
-            self.state.song_skip = True
+            self.state.request_info = True
+        
+        if self.state.request_info:
+            self.state.request_info = False
+            self.state.do_quick_info = True
             self.render_info_texture(
                 self.state.track_name,
                 self.state.artist,
-                getattr(self.state, "album", ""),
+                self.state.album,
             )
             self.trigger_info()
 
@@ -703,16 +791,15 @@ class Visualizer(mglw.WindowConfig):
                 self.interrupt_info()
             else:
                 print(self.state)
-                self.state.song_skip = True
-                self.trigger_info()
+                self.state.request_info = True
 
         # gain control
         elif key == self.wnd.keys.A:
-            self.state.devices.output_gain -= 0.3
+            self.state.devices.output_gain -= 0.7
         elif key == self.wnd.keys.S:
             self.state.devices.output_gain = SystemDeviceManager.DEAFULT_GAIN
         elif key == self.wnd.keys.D:
-            self.state.devices.output_gain += 0.3
+            self.state.devices.output_gain += 0.7
 
         # toggle free
         elif key == self.wnd.keys.F:
@@ -740,6 +827,10 @@ class Visualizer(mglw.WindowConfig):
                 self.trigger_info()
             except Exception:
                 pass
+        
+        # jam control
+        elif key == self.wnd.keys.J:
+            self.set_new_jam_key()
 
 # ── Einstiegspunkt ────────────────────────────────────────────────────────────
 
