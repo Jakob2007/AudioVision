@@ -31,17 +31,23 @@ void main(){
 
     /* subtle bass pulse ring behind the text */
     float r = length(p);
-    float pulse = 0.6 + 0.4 * b;
+    float pulse = 0.6 + 0.2 * b;
     float ring = exp(-abs(r - pulse * 0.55) * 18.0) * 0.4 * b;
-    bg += vec3(0.4, 0.2, 0.8) * ring;
+    bg += vec3(0.3, 0.3, 0.5) * ring;
 
     /* text texture — rendered by Pillow on CPU */
     vec4 textSample = texture(iText, uv);
     vec3 col = mix(bg, textSample.rgb, textSample.a);
 
+    /* spinning vinyl lines */
+    float angle = atan(p.y, p.x) + iTime * 0.5;
+    float lines = abs(sin(angle * 3.0));
+    float vinyl = lines * exp(-r * 0.4);
+    col += vec3(0.3, 0.3, 0.35) * vinyl * 0.2;
+
     // vignette
     float vignette = smoothstep(1.60 - b*.2, 2.30 - b*.2, r);
-    col = mix(col, vec3(0.15, 0.0, 0.15), vignette);
+    col = mix(col, vec3(0.3, 0.3, 0.5), vignette);
 
     /* fade the whole overlay with iAlpha */
     fragColor = vec4(col, iAlpha);

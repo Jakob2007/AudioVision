@@ -11,6 +11,8 @@ import os
 import threading
 import numpy as np
 import platform
+import time
+import requests
 
 from dataclasses import dataclass, field
 from collections import deque
@@ -19,18 +21,25 @@ import moderngl
 import moderngl_window as mglw
 from PIL import Image, ImageDraw, ImageFont
 
+import syncedlyrics as sl
+import pylrc
+
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
+
+DO_LYRIC_FETCHING = True
+
+# ! Check if queue actually works
 
 """
 TODO:
 
-song cover animation
+song cover animation von https://itunes.apple.com/search?term=Radiohead+Creep&entity=song&limit=1 
 lyric display
 (js texts)
 lrclib lyrics integrieren
 do sth with spotify beat detection (depricated?)
-
+include jam link (has to be typed in)
 """
 
 class SystemDeviceManager:
@@ -72,11 +81,122 @@ class SystemDeviceManager:
             self.active_lock = True
             self.set_system_output_device(self.default_device_name)
 
-
     def close(self):
         print("closing to " + self.default_device_name)
         if self.default_device_name:
             self.set_system_output_device(self.default_device_name)
+
+class LrcManager:
+    current_lyrics: list = []
+    current_id: str = ""
+    queued_lyrics: list = []
+    queue_id: str = ""
+
+    running: bool = True
+    timer_thread: threading.Thread = None
+    progress_ms: int = 0
+    last_update_time_sec: float = 0
+    last_update_ms: int = 0
+
+    def progress_timer_counter(self):
+        step_sec = 10 * 0.001
+        while self.running:
+            now = time.perf_counter()
+            delta_progress_ms = (now - self.last_update_time_sec)*1000
+            self.progress_ms = round(self.last_update_ms + delta_progress_ms)
+            time.sleep(step_sec)
+
+    def __init__(self):
+        t = threading.Thread(target=self.progress_timer_counter, daemon=True, name="exact timer")
+        t.start()
+        self.timer_thread = t
+
+    def set_time_ms(self, progress_ms):
+        self.last_update_time_sec = time.perf_counter()
+        self.last_update_ms = progress_ms
+        self.progress_ms = progress_ms
+
+    def end(self):
+        self.running = False
+        self.timer_thread.join(timeout=1)
+    
+    # def get_lyrics_lrclib(track_name, artist, album, duration_sec):
+    #     url = "https://lrclib.net/api/get"
+    #     "?artist_name=Borislav+Slavov&track_name=I+Want+to+Live&album_name=Baldur%27s+Gate+3+(Original+Game+Soundtrack)&duration=233"
+    #     params =  {
+    #         "artist_name"   : artist,
+    #         "track_name"    : track_name,
+    #         "album_name"    : album,
+    #         "duration"      : duration_sec
+    #     }
+    #     result = requests.get(url, params=params)
+
+    #     if result.status_code != 200:
+    #         return dict()
+        
+    #     json = result.json()
+    #     json["syncedLyrics"]
+
+
+    def get_lyrics(self, track_name, artist) -> list:
+        # * Handle few cases where there is word timestamps (enhanced=True)
+        try:
+            result = sl.search(f"{track_name} {artist}", enhanced=False, synced_only=True)
+        except:
+            return list()
+        if not result:
+            return list()
+        try:
+            lyrics = list(pylrc.parse(result))
+        except:
+            return list()
+
+        return lyrics
+    
+    def await_lyrics(self, track_name, artist, target):
+        if not DO_LYRIC_FETCHING: 
+            return
+        
+        target.clear()
+        target.extend(self.get_lyrics(track_name, artist))
+
+    def set_current_song(self, track_name, artist):
+        id = track_name + artist
+        if id == self.current_id:
+            return
+        
+        if id == self.queue_id:
+            self.current_lyrics = self.queued_lyrics
+            print("used queue")
+            return
+        
+        threading.Thread(target=self.await_lyrics, daemon=True, name="lyric retrival", args=[track_name, artist, self.current_lyrics]).start()
+    
+    def queue_song(self, track_name, artist):
+        id = track_name + artist
+        if id == self.queue_id:
+            return
+        
+        if id == self.current_id:
+            return
+        
+        self.queue_id = id
+        threading.Thread(target=self.await_lyrics, daemon=True, name="lyric retrival", args=[track_name, artist, self.queued_lyrics]).start()
+
+    def get_line(self):
+        if not self.current_lyrics:
+            return ""
+        
+        progress_sec = self.progress_ms * 0.001
+        
+        for i,line in enumerate(self.current_lyrics[:-1]):
+            nxt = self.current_lyrics[i+1]
+            if nxt.time >= progress_sec:
+                return line.text.strip()
+        
+        return ""
+
+
 
 # ── Shared State ─────────────────────────────────────────────────────────────
 
@@ -88,6 +208,7 @@ class AppState:
     stop_event:  threading.Event  = field(default_factory=threading.Event)
     spotify_api: spotipy.Spotify  = None
     devices: SystemDeviceManager  = None
+    lyrics: LrcManager            = None
 
     is_new_song: bool = True
 
@@ -100,11 +221,14 @@ class AppState:
     duration_ms: int = 0
     progress_ms: int = 0
 
+    request_upcoming_data: bool = False
     next_track_name:  str = ""
     next_artist:      str = ""
     next_album:       str = ""
 
     song_skip: bool = True
+
+    # jam_url: str = True
 
 
     def __str__(self):
@@ -119,7 +243,7 @@ def start_audio_thread(state: AppState) -> threading.Thread:
 
     def get_device_index(name):
         devices = sd.query_devices()
-        return next(i for i, d in enumerate(devices) if name in d["name"])
+        return next(i for i, d in enumerate(devices) if name in d["name"] and d["max_output_channels"] == 2)
 
     # Find BlackHole input and a valid output device for instant replay
     black_hole_index = get_device_index(SystemDeviceManager.ROUTER)
@@ -191,11 +315,16 @@ def start_spotify_thread(state: AppState) -> threading.Thread:
                     state.progress_ms   = pb["progress_ms"]
                     state.album         = track["album"]["name"]
                     state.duration_ms   = track["duration_ms"]
+                    state.lyrics.set_time_ms(state.progress_ms)
             except Exception:
                 pass
 
+            if state.is_new_song:
+                state.request_upcoming_data = False
+                state.next_track_name = None
+
             # get upcoming track data
-            if not state.next_track_name or state.next_track_name == state.track_name:
+            if not state.next_track_name or state.next_track_name == state.track_name or state.request_upcoming_data:
                 try:
                     queue = sp.queue()
                     if queue and queue["queue"]:
@@ -205,15 +334,26 @@ def start_spotify_thread(state: AppState) -> threading.Thread:
                         state.next_album      = nxt["album"]["name"]
                 except Exception:
                     pass
+                if state.next_track_name:
+                    state.lyrics.queue_song(state.next_track_name, state.next_artist)
 
-            # get audio analysis
+            # get lyrics
             if state.is_new_song:
                 try:
-                    # analysis = sp.audio_analysis(state.track_id)
-                    # state.beats = analysis["beats"]
-                    pass
+                    state.lyrics.set_current_song(state.track_name, state.artist)
                 except Exception:
                     pass
+
+            # * depricated
+            # # get audio analysis 
+            # if state.is_new_song:
+            #     try:
+            #         analysis = sp.audio_analysis(state.track_id)
+            #         state.beats = analysis["beats"]
+            #         pass
+            #     except Exception:
+            #         pass
+
             state.stop_event.wait(timeout=1.0)
 
     t = threading.Thread(target=run, daemon=True, name="spotify")
@@ -228,6 +368,7 @@ class Visualizer(mglw.WindowConfig):
     gl_version = (4, 1)
     window_size = (1920, 1080)
     state: AppState = None
+    song_transition_time_ms: int = 2000
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -247,10 +388,10 @@ class Visualizer(mglw.WindowConfig):
 
         self.time = 0.0
 
-        # overlay shader
-        self.overlay_prog = self.ctx.program(
+        # info shader
+        self.info_prog = self.ctx.program(
             vertex_shader=self.vert_src,
-            fragment_shader=self.load_file(os.path.join(base_dir, "overlay.glsl"))
+            fragment_shader=self.load_file(os.path.join(base_dir, "info.glsl"))
         )
 
         # idle shader
@@ -259,15 +400,21 @@ class Visualizer(mglw.WindowConfig):
             fragment_shader=self.load_file(os.path.join(base_dir, "idle.glsl"))
         )
 
+        # textures
         self.fft_tex = self.ctx.texture((512, 1), components=1, dtype="f4")
-        self.text_tex = self.ctx.texture((1920, 1080), components=4, dtype="f1")
-        self.text_tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
+        self.info_tex = self.ctx.texture((1920, 1080), components=4, dtype="f1")
+        self.info_tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
+        self.overlay_tex = self.ctx.texture((1920, 1080), components=4, dtype="f1")
+        self.overlay_tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
         self.quad = mglw.geometry.quad_fs()
 
-        # overlay state
-        self.overlay_active   = False
-        self.overlay_start    = 0.0
-        self.overlay_duration = 4.0
+        # lyric state
+        self.last_lyric = ""
+
+        # info state
+        self.info_active   = False
+        self.info_start    = 0.0
+        self.info_duration = 4.0
         self.fade_duration    = 1.0
 
         # idle state
@@ -290,7 +437,7 @@ class Visualizer(mglw.WindowConfig):
     def reload_shaders(self):
         self.shaders = sorted([
             f for f in os.listdir(self.shader_dir)
-            if f.endswith(".glsl") and not f.startswith(("vert", "overlay", "idle"))
+            if f.endswith(".glsl") and not f.startswith(("vert", "info", "idle"))
         ])
         self.shader_index = max(0, min(self.shader_index, len(self.shaders) - 1))
         self.build_program()
@@ -331,16 +478,16 @@ class Visualizer(mglw.WindowConfig):
             self.idle_main_alpha = 1.0
             self.idle_fade_alpha = 0.0
 
-    # ─── text texture ────────────────────────────────────────────────
+    # ─── info texture ────────────────────────────────────────────────
 
-    def render_text_texture(self, track_name: str, artist: str, album: str):
+    def render_info_texture(self, track_name: str, artist: str, album: str):
         img = Image.new("RGBA", (1920, 1080), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
 
         try:
-            font_large  = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 96)
-            font_medium = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 52)
-            font_small  = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 38)
+            font_large  = ImageFont.truetype("/System/Library/Fonts/Zapfino.ttf", 96)
+            font_medium = ImageFont.truetype("/System/Library/Fonts/Zapfino.ttf", 52)
+            font_small  = ImageFont.truetype("/System/Library/Fonts/Zapfino.ttf", 38)
         except Exception:
             font_large = font_medium = font_small = ImageFont.load_default()
 
@@ -353,40 +500,62 @@ class Visualizer(mglw.WindowConfig):
                   fill=(140, 140, 160, 160), anchor="mm")
 
         img = img.transpose(Image.FLIP_TOP_BOTTOM)
-        self.text_tex.write(img.tobytes())
+        self.info_tex.write(img.tobytes())
 
-    # ─── overlay trigger ─────────────────────────────────────────────
+    # ─── overlay texture ────────────────────────────────────────────────
 
-    def should_trigger_overlay(self) -> bool:
+    def render_overlay_texture(self, line):
+        img = Image.new("RGBA", (1920, 1080), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+
+        font  = ImageFont.truetype("/System/Library/Fonts/Avenir Next.ttc", 52)
+
+        cx = 960
+        draw.text((cx, 750), line, font=font, fill=(255, 255, 255, 255), anchor="mm")
+
+        img = img.transpose(Image.FLIP_TOP_BOTTOM)
+        self.overlay_tex.write(img.tobytes())
+
+    # ─── info trigger ─────────────────────────────────────────────
+
+    def should_get_next_song_data(self) -> bool:
         progress = self.state.progress_ms
         duration = self.state.duration_ms
         if duration <= 0 or progress <= 0:
             return False
-        return (duration - progress) <= 2000
+        leftover_time = duration - progress
+        return leftover_time <= self.song_transition_time_ms + 2000 and leftover_time >= self.song_transition_time_ms + 1000
 
-    def trigger_overlay(self):
+    def should_trigger_info(self) -> bool:
+        progress = self.state.progress_ms
+        duration = self.state.duration_ms
+        if duration <= 0 or progress <= 0:
+            return False
+        return (duration - progress) <= self.song_transition_time_ms
+
+    def trigger_info(self):
         if self.state.devices.active_lock:
             return False
-        self.overlay_active = True
-        self.overlay_start  = self.time
+        self.info_active = True
+        self.info_start  = self.time
 
-    def interrupt_overlay(self):
-        self.overlay_active = False
+    def interrupt_info(self):
+        self.info_active = False
 
-    def overlay_alpha(self, time: float) -> float:
-        if not self.overlay_active:
+    def info_alpha(self, time: float) -> float:
+        if not self.info_active:
             return 0.0
-        elapsed = time - self.overlay_start
-        total   = self.overlay_duration + self.fade_duration * 2
+        elapsed = time - self.info_start
+        total   = self.info_duration + self.fade_duration * 2
         if elapsed > total:
-            self.overlay_active = False
+            self.info_active = False
             self.state.song_skip = False
             return 0.0
         if elapsed < self.fade_duration:
             return 1.0 if self.state.song_skip else elapsed / self.fade_duration
-        if elapsed < self.fade_duration + self.overlay_duration:
+        if elapsed < self.fade_duration + self.info_duration:
             return 1.0
-        return 1.0 - (elapsed - self.fade_duration - self.overlay_duration) / self.fade_duration
+        return 1.0 - (elapsed - self.fade_duration - self.info_duration) / self.fade_duration
 
     def get_next_track_info(self):
         name   = self.state.next_track_name or self.state.track_name
@@ -402,20 +571,22 @@ class Visualizer(mglw.WindowConfig):
 
     def upload_main_uniforms(self):
         self.fft_tex.use(location=0)
+        self.overlay_tex.use(location=1)
         self.set_uniform(self.prog, "iFFT",  0)
+        self.set_uniform(self.prog, "iText",  1)
         self.set_uniform(self.prog, "iTime", self.time)
         self.set_uniform(self.prog, "iBPM",  self.state.bpm)
         self.set_uniform(self.prog, "iRes",  tuple(self.wnd.size))
         self.set_uniform(self.prog, "iAlpha", self.idle_main_alpha)
 
-    def upload_overlay_uniforms(self, alpha: float):
+    def upload_info_uniforms(self, alpha: float):
         self.fft_tex.use(location=0)
-        self.text_tex.use(location=1)
-        self.set_uniform(self.overlay_prog, "iFFT",   0)
-        self.set_uniform(self.overlay_prog, "iText",  1)
-        self.set_uniform(self.overlay_prog, "iTime",  self.time)
-        self.set_uniform(self.overlay_prog, "iAlpha", alpha)
-        self.set_uniform(self.overlay_prog, "iRes",   tuple(self.wnd.size))
+        self.info_tex.use(location=1)
+        self.set_uniform(self.info_prog, "iFFT",   0)
+        self.set_uniform(self.info_prog, "iText",  1)
+        self.set_uniform(self.info_prog, "iTime",  self.time)
+        self.set_uniform(self.info_prog, "iAlpha", alpha)
+        self.set_uniform(self.info_prog, "iRes",   tuple(self.wnd.size))
 
     def upload_idle_uniforms(self, alpha: float):
         self.fft_tex.use(location=0)
@@ -436,36 +607,45 @@ class Visualizer(mglw.WindowConfig):
         # ── track change detection ────────────────────────────────────
         track_id = getattr(self.state, "track_id", None)
 
-        if not self.overlay_active and self.should_trigger_overlay():
+        if self.should_get_next_song_data() and not self.state.request_upcoming_data:
+            self.state.request_upcoming_data = True
+
+        if not self.info_active and self.should_trigger_info():
             next_name, next_artist, next_album = self.get_next_track_info()
-            self.render_text_texture(next_name, next_artist, next_album)
-            self.trigger_overlay()
+            self.render_info_texture(next_name, next_artist, next_album)
+            self.trigger_info()
 
         elif self.state.is_new_song:
             self.state.song_skip = True
-            self.render_text_texture(
+            self.render_info_texture(
                 self.state.track_name,
                 self.state.artist,
                 getattr(self.state, "album", ""),
             )
-            self.trigger_overlay()
+            self.trigger_info()
+
+        # ── render overlay ────────────────────────────────────────────
+        line = self.state.lyrics.get_line()
+        if self.last_lyric != line:
+            self.render_overlay_texture(line)
+            self.last_lyric = line
 
         # ── upload FFT ────────────────────────────────────────────────
         with self.state.fft_lock:
             fft_copy = self.state.fft_data.astype("f4")
         self.fft_tex.write(fft_copy.tobytes())
 
-        o_alpha = self.overlay_alpha(time)
+        o_alpha = self.info_alpha(time)
 
         # ── draw layers ───────────────────────────────────────────────
         #
         #  Layer order (back to front):
         #    1. main shader      (always rendered as base)
         #    2. idle shader      (blended on top, slow fade in/instant off)
-        #    3. overlay shader   (blended on top of everything)
+        #    3. info shader   (blended on top of everything)
         #
-        # Idle and overlay can coexist: e.g. song ends → idle fades in,
-        # next song detected → overlay fires on top, then idle snaps off
+        # Idle and info can coexist: e.g. song ends → idle fades in,
+        # next song detected → info fires on top, then idle snaps off
         # when playback resumes.
 
         # layer 1 — main (fades out when idle kicks in)
@@ -487,12 +667,12 @@ class Visualizer(mglw.WindowConfig):
             self.quad.render(self.idle_prog)
             self.ctx.disable(moderngl.BLEND)
 
-        # layer 3 — overlay (song info card)
+        # layer 3 — info (song info card)
         if o_alpha > 0.001:
             self.ctx.enable(moderngl.BLEND)
             self.ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
-            self.upload_overlay_uniforms(o_alpha)
-            self.quad.render(self.overlay_prog)
+            self.upload_info_uniforms(o_alpha)
+            self.quad.render(self.info_prog)
             self.ctx.disable(moderngl.BLEND)
 
     # ─── input ───────────────────────────────────────────────────────
@@ -506,28 +686,25 @@ class Visualizer(mglw.WindowConfig):
             self.state.stop_event.set()
             self.wnd.close()
 
-        # info
-        elif key == self.wnd.keys.I:
-            print(self.state)
-
         # shader control
         elif key == self.wnd.keys.Q:
-            self.interrupt_overlay()
+            self.interrupt_info()
             self.prev_shader()
         elif key == self.wnd.keys.E:
-            self.interrupt_overlay()
+            self.interrupt_info()
             self.next_shader()
         elif key == self.wnd.keys.R:
-            self.interrupt_overlay()
+            self.interrupt_info()
             self.reload_shaders()
 
-        # overlay
-        elif key == self.wnd.keys.O:
-            if self.overlay_active:
-                self.interrupt_overlay()
+        # info
+        elif key == self.wnd.keys.I:
+            if self.info_active:
+                self.interrupt_info()
             else:
+                print(self.state)
                 self.state.song_skip = True
-                self.trigger_overlay()
+                self.trigger_info()
 
         # gain control
         elif key == self.wnd.keys.A:
@@ -541,9 +718,9 @@ class Visualizer(mglw.WindowConfig):
         elif key == self.wnd.keys.F:
             self.state.devices.toggle_free()
             if self.state.devices.active:
-                self.trigger_overlay()
+                self.trigger_info()
             else:
-                self.interrupt_overlay()
+                self.interrupt_info()
 
         # spotify control
         elif key == self.wnd.keys.SPACE:
@@ -560,6 +737,7 @@ class Visualizer(mglw.WindowConfig):
             try:
                 sp = self.state.spotify_api
                 sp.next_track()
+                self.trigger_info()
             except Exception:
                 pass
 
@@ -569,6 +747,7 @@ def main():
     state = AppState()
 
     state.devices = SystemDeviceManager()
+    state.lyrics = LrcManager()
 
     # Threads starten
     audio_thread = start_audio_thread(state)
@@ -583,6 +762,7 @@ def main():
         pass
     finally:
         state.devices.close()
+        state.lyrics.end()
         state.stop_event.set()
         audio_thread.join(timeout=2)
         spotify_thread.join(timeout=2)
