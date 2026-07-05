@@ -1,31 +1,34 @@
-#version {glsl_version}
-{precision}
+#version ${GLSL_VERSION}
+${PRECISION}
+
 uniform sampler2D iFFT;
 uniform float iTime;
 uniform float iBPM;
 uniform vec2 iRes;
+uniform float iAlpha;
 in vec2 uv;
 out vec4 fragColor;
 
+
 #define N_BARS 16
 
-float fft(float x){{
+float fft(float x){
     return texture(iFFT, vec2(x, 0.0)).r;
-}}
+}
 
-float bass(){{
+float bass(){
     float s = 0.0;
     for(int i = 0; i < 8; i++) s += fft(float(i) / 512.0);
     return s / 8.0;
-}}
+}
 
-float mid(int bin){{
+float mid(int bin){
     float lo = 0.05, hi = 0.55;
     float x = lo + (hi - lo) * (float(bin) + 0.5) / float(N_BARS);
     return fft(x);
-}}
+}
 
-void main(){{
+void main(){
     vec2 p = (uv * 2.0 - 1.0) * vec2(iRes.x / iRes.y, 1.0);
     float r = length(p);
     float a = atan(p.y, p.x);
@@ -38,19 +41,19 @@ void main(){{
     float TOTAL   = BAR_W + BAR_GAP;
     float half_N    = float(N_BARS) * 0.5;
 
-    for(int i = 0; i < N_BARS; i++){{
+    for(int i = 0; i < N_BARS; i++){
         float xi  = (float(i) - half_N + 0.5) * TOTAL;
         float bh  = mid(i) * 0.85;
         float inX = step(abs(p.x - xi), BAR_W * 0.5);
         float inY = step(abs(p.y), bh);
-        if(inX * inY > 0.0){{
+        if(inX * inY > 0.0){
             float norm = abs(p.y) / bh;
             vec3 lo = vec3(0.05, 0.30, 0.90);
             vec3 hi = vec3(0.00, 0.90, 0.80);
             barCol  = mix(lo, hi, norm);
             barCol *= 1.0 - smoothstep(0.82, 1.0, norm);
-        }}
-    }}
+        }
+    }
 
     /* ── deformed circle ─────────────────────────────────────────── */
     float wave = 0.0;
@@ -76,7 +79,7 @@ void main(){{
     /* ── bloom ───────────────────────────────────────────────────── */
     col += mix(colA, colB, shimmer) * exp(-abs(dist) * 18.0) * 0.55 * (b * 0.5 + 0.5);
 
-    for(int i = 0; i < N_BARS; i++){{
+    for(int i = 0; i < N_BARS; i++){
         float xi = (float(i) - half_N + 0.5) * TOTAL;
         float bh = mid(i) * 0.85;
         float dx = max(abs(p.x - xi) - BAR_W * 0.5, 0.0);
@@ -84,12 +87,12 @@ void main(){{
         float bd = length(vec2(dx, dy));
         float fi = float(i) / float(N_BARS);
         col += mix(vec3(0.05, 0.30, 0.90), vec3(0.00, 0.90, 0.80), fi) * exp(-bd * 22.0) * 0.22;
-    }}
+    }
 
     /* ── vignette + tone map ─────────────────────────────────────── */
     col *= 1.0 - smoothstep(0.65, 1.45, r);
     col  = col / (col + 0.8);
     col  = pow(col, vec3(0.85));
 
-    fragColor = vec4(col, 1.0);
-}}
+    fragColor = vec4(col, iAlpha);
+}

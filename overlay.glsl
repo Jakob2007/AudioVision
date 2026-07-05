@@ -1,5 +1,6 @@
-#version {glsl_version}
-{precision}
+#version ${GLSL_VERSION}
+${PRECISION}
+
 uniform sampler2D iFFT;
 uniform sampler2D iText;
 uniform float iTime;
@@ -10,17 +11,17 @@ out vec4 fragColor;
 
 #define N_BARS 32
 
-float fft(float x){{
+float fft(float x){
     return texture(iFFT, vec2(x, 0.0)).r;
-}}
+}
 
-float bass(){{
+float bass(){
     float s = 0.0;
     for(int i = 0; i < 8; i++) s += fft(float(i) / 512.0);
     return s / 8.0;
-}}
+}
 
-void main(){{
+void main(){
     vec2 p = (uv * 2.0 - 1.0) * vec2(iRes.x / iRes.y, 1.0);
     float b = bass();
 
@@ -38,6 +39,10 @@ void main(){{
     vec4 textSample = texture(iText, uv);
     vec3 col = mix(bg, textSample.rgb, textSample.a);
 
+    // vignette
+    float vignette = smoothstep(1.60 - b*.2, 2.30 - b*.2, r);
+    col = mix(col, vec3(0.15, 0.0, 0.15), vignette);
+
     /* fade the whole overlay with iAlpha */
     fragColor = vec4(col, iAlpha);
-}}
+}
