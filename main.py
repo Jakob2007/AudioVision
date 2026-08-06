@@ -8,30 +8,30 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import os
-import threading
-import numpy as np
-import platform
 import time
 import requests
+import platform
+import threading
 import subprocess
+import numpy as np
 
-from dataclasses import dataclass, field
 from collections import deque
+from dataclasses import dataclass, field
 
 import moderngl
 import moderngl_window as mglw
 from PIL import Image, ImageDraw, ImageFont
 
-import syncedlyrics as sl
 import pylrc
+import syncedlyrics as sl
 
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 
 import qrcode
 from qrcode.image.styledpil import StyledPilImage
-from qrcode.image.styles.moduledrawers.pil import RoundedModuleDrawer
 from qrcode.image.styles.colormasks import SolidFillColorMask
+from qrcode.image.styles.moduledrawers.pil import RoundedModuleDrawer
 
 DO_LYRIC_FETCHING = True
 
@@ -125,69 +125,89 @@ class LrcManager:
     def end(self):
         self.running = False
         self.timer_thread.join(timeout=1)
+
+    def id(self, track_name, artist, album, duration_sec):
+        return f"{track_name}{artist}{album}{duration_sec}"
+
+    def get_lyrics_backup(self, track_name, artist) -> str:
+            print("trying backup lyrics")
+            # inacurate due to differen version of songs, duration can not be passed
+            # * Handle few cases where there is word timestamps (enhanced=True)
+            try:
+                result = sl.search(f"{track_name} {artist}", enhanced=False, synced_only=True)
+            except:
+                return ""
+
+            if not result:
+                return ""
     
-    # def get_lyrics_lrclib(track_name, artist, album, duration_sec):
-    #     url = "https://lrclib.net/api/get"
-    #     "?artist_name=Borislav+Slavov&track_name=I+Want+to+Live&album_name=Baldur%27s+Gate+3+(Original+Game+Soundtrack)&duration=233"
-    #     params =  {
-    #         "artist_name"   : artist,
-    #         "track_name"    : track_name,
-    #         "album_name"    : album,
-    #         "duration"      : duration_sec
-    #     }
-    #     result = requests.get(url, params=params)
+            return result
+    
+    def get_lyrics(self, track_name, artist, album, duration_sec) -> list:
+        url = "https://lrclib.net/api/get"
+        params =  {
+            "artist_name"   : artist,
+            "track_name"    : track_name,
+            "album_name"    : album,
+            "duration"      : duration_sec
+        }
+        result = requests.get(url, params=params)
+        # bsp: "?artist_name=Borislav+Slavov&track_name=I+Want+to+Live&album_name=Baldur%27s+Gate+3+(Original+Game+Soundtrack)&duration=233"
 
-    #     if result.status_code != 200:
-    #         return dict()
-        
-    #     json = result.json()
-    #     json["syncedLyrics"]
+        if result.status_code == 200:
+            json = result.json()
+            raw = json["syncedLyrics"]
+        else:
+            raw = self.get_lyrics_backup(track_name, artist)
 
-
-    def get_lyrics(self, track_name, artist) -> list:
-        # * Handle few cases where there is word timestamps (enhanced=True)
         try:
-            result = sl.search(f"{track_name} {artist}", enhanced=False, synced_only=True)
+            return list(pylrc.parse(raw))
         except:
             return list()
-        if not result:
-            return list()
-        try:
-            lyrics = list(pylrc.parse(result))
-        except:
-            return list()
-
-        return lyrics
     
-    def await_lyrics(self, track_name, artist, target):
+    def await_lyrics(self, track_name, artist, album, duration_sec, is_queue):
         if not DO_LYRIC_FETCHING: 
             return
-        
-        target.clear()
-        target.extend(self.get_lyrics(track_name, artist))
 
-    def set_current_song(self, track_name, artist):
-        id = track_name + artist
+        target = self.current_lyrics if not is_queue else self.queued_lyrics
+        target.clear()
+
+        result = self.get_lyrics(track_name, artist, album, duration_sec)
+
+        present_id = self.current_id if not is_queue else self.queue_id
+
+        if self.id(track_name, artist, album, duration_sec) != present_id:
+            # while lyrics were loading another song was started
+            print("scrapped " + track_name)
+            return
+
+        target.extend(result)
+
+    def set_current_song(self, track_name, artist, album, duration_ms):
+        duration_sec = duration_ms // 1000
+        id = self.id(track_name, artist, album, duration_sec)
         if id == self.current_id:
             return
-        
+        self.current_id = id
+
         if id == self.queue_id:
-            self.current_lyrics = self.queued_lyrics
-            print("used queue")
+            self.current_lyrics = self.queued_lyrics.copy()
             return
-        
-        threading.Thread(target=self.await_lyrics, daemon=True, name="lyric retrival", args=[track_name, artist, self.current_lyrics]).start()
+
+        threading.Thread(target=self.await_lyrics, daemon=True, name="lyric retrival", args=[track_name, artist, album, duration_sec, False]).start()
     
-    def queue_song(self, track_name, artist):
-        id = track_name + artist
+    def queue_song(self, track_name, artist, album, duration_ms):
+        duration_sec = duration_ms // 1000
+        id = self.id(track_name, artist, album, duration_sec)
         if id == self.queue_id:
             return
+        self.queue_id = id
         
         if id == self.current_id:
+            self.queued_lyrics = self.current_lyrics.copy()
             return
         
-        self.queue_id = id
-        threading.Thread(target=self.await_lyrics, daemon=True, name="lyric retrival", args=[track_name, artist, self.queued_lyrics]).start()
+        threading.Thread(target=self.await_lyrics, daemon=True, name="lyric retrival", args=[track_name, artist, album, duration_sec, True]).start()
 
     def get_line(self):
         if not self.current_lyrics:
@@ -326,12 +346,21 @@ def start_spotify_thread(state: AppState) -> threading.Thread:
             except Exception:
                 pass
 
+            # ! ?? warum
+            # if state.is_new_song:
+            #     state.request_upcoming_data = False
+            #     state.next_track_name = None
+
+            # get lyrics
             if state.is_new_song:
-                state.request_upcoming_data = False
-                state.next_track_name = None
+                try:
+                    state.lyrics.set_current_song(state.track_name, state.artist, state.album, state.duration_ms)
+                except Exception:
+                    pass
 
             # get upcoming track data
             if not state.next_track_name or state.next_track_name == state.track_name or state.request_upcoming_data:
+                duration = 0
                 try:
                     queue = sp.queue()
                     if queue and queue["queue"]:
@@ -339,17 +368,11 @@ def start_spotify_thread(state: AppState) -> threading.Thread:
                         state.next_track_name = nxt["name"]
                         state.next_artist     = nxt["artists"][0]["name"]
                         state.next_album      = nxt["album"]["name"]
+                        duration = nxt["duration_ms"]
                 except Exception:
                     pass
                 if state.next_track_name:
-                    state.lyrics.queue_song(state.next_track_name, state.next_artist)
-
-            # get lyrics
-            if state.is_new_song:
-                try:
-                    state.lyrics.set_current_song(state.track_name, state.artist)
-                except Exception:
-                    pass
+                    state.lyrics.queue_song(state.next_track_name, state.next_artist, state.next_album, duration)
 
             # * depricated
             # # get audio analysis 
@@ -603,6 +626,7 @@ class Visualizer(mglw.WindowConfig):
     # ─── info trigger ─────────────────────────────────────────────
 
     def should_get_next_song_data(self) -> bool:
+        "if song is about to end -> true"
         progress = self.state.progress_ms
         duration = self.state.duration_ms
         if duration <= 0 or progress <= 0:
@@ -691,7 +715,7 @@ class Visualizer(mglw.WindowConfig):
         # ── track change detection ────────────────────────────────────
         track_id = getattr(self.state, "track_id", None)
 
-        if self.should_get_next_song_data() and not self.state.request_upcoming_data:
+        if self.should_get_next_song_data():
             self.state.request_upcoming_data = True
 
         if not self.info_active and self.should_trigger_info():
