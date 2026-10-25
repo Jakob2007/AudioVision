@@ -16,7 +16,7 @@ float fft(float x) {
 float bass() {
     float s = 0.0;
     for (int i = 0; i < 3; i++) s += fft(float(i) / 512.0);
-    return s / 3.0;
+    return s / 3.0 * 10;
 }
 
 float mid() {
@@ -41,7 +41,7 @@ vec3 palette(float t) {
 
 vec4 wave(vec2 p, float amp, float freq, float phase, float thick, vec3 hue) {
     float x = p.x - phase;
-    float y = p.y + amp * sin(freq * x);
+    float y = p.y + amp * sin(freq * x) + sin(freq * x * 20 + iTime * 20) * bass() * .1;
     float bright = smoothstep(0.0, 1.0, 1.0 - abs(y) / thick);
     return vec4(vec3(bright) * hue, 1.0);
 }
@@ -76,13 +76,13 @@ void main() {
 
         // mid very slightly thickens lines — barely perceptible, adds warmth
         float thick = 0.01 + 0.001 * pow(abs(pd.x), 8.0)
-                    + .1 * b * (1.0 - layer);
+                    + .5 * b * layer;
 
         // mid shifts the palette offset slightly — a slow hue breathe
         float hueT = 0.5 * pd.x + 1.0 * layer - 0.5 * iTime + 0.08 * m;
         vec3 hue = palette(hueT);
 
-        col += wave(pd, amp, freq, phase, thick, hue);
+        col += wave(pd, amp, freq, phase, thick, hue) * (1 - layer);
     }
 
     fragColor = vec4(col.rgb, iAlpha);

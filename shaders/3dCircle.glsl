@@ -15,7 +15,7 @@ out vec4 fragColor;
 // ── FFT ──────────────────────────────────────────────────────────────────────
 
 float fftAt(float x) {
-    return texture(iFFT, vec2(abs(x-.5)*.02, 0.0)).r * .15;
+    return texture(iFFT, vec2(abs(x-.5)*.02, 0.0)).r * 1.95;
     //return texture(iFFT, vec2(clamp((sin(x*TWO_PI*2)*.5+.5)*FFT_MAX + .0, 0.0, 1.0), 0.0)).r;
 }
 // float fftAt(float x) {
@@ -161,7 +161,7 @@ void main() {
     float hitRing  = -1.0;
     vec3  hitPos;
 
-    float slabH = 0.50;
+    float slabH = 1.20;
     float tEnter, tExit;
     if (slabTest(camPos, rayDir, slabH, tEnter, tExit)) {
         float t         = max(tEnter - 0.05, 0.0);

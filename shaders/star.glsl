@@ -20,7 +20,7 @@ float fftAt(float x) {
 float bass() {
     float s = 0.0;
     for (int i = 0; i < 6; i++) s += fftAt(float(i) / 512.0);
-    return s / 6.0;
+    return pow(10, s / 6.0)-1;
 }
 
 float mid() {
@@ -67,11 +67,11 @@ float waveLine(float u, float v, float freq, float phase,
 
     // wave centre position oscillates along v with sinc amplitude
     float wave = 0;
-    wave+= sin(u * freq + b + rand(phase)*.01) * envelope * (.2 + b * 2) * (1+chOffset*.2) * (.5 + chOffset)*.5q;
-    wave+= cos(u * freq * 5 + i) * envelope * .2 * sin(u*freq+phase+i);
-    wave+= rand(vec2(round(u*200)/200, round(phase*20)/20))*.01 * b * b;
-    wave+= sin(u * freq * 10 + rand(phase*i)*2) * .01 * b;
-    // wave+= pow(sin(u+phase), 17) * .1;
+    // wave+= sin(u * freq + b + rand(phase)*.01) * envelope * (.2 + b * 2) * (1+chOffset*.2) * (.5 + chOffset)*.2;
+    // wave+= cos(u * freq * 5 + i) * envelope * .2 * sin(u*freq+phase+i);
+    // wave+= rand(vec2(round(u*200)/200, round(phase*20)/20))*.01 * b * b;
+    wave+= sin(u * freq * 10 + rand(phase*i)*2) * .1 * b;
+    wave+= pow(sin(u+phase), 17) * .1;
     float p = u*10 - sin(rand(round(phase)+i))*30;
     float f = (mod(phase+i, 1)) * freq * .3 * round(mod(phase+i, 2)-1) * b;
     wave+= pow(sin(p) / p, 3) * f * .2;
@@ -80,7 +80,7 @@ float waveLine(float u, float v, float freq, float phase,
     float dist = abs(v - wave);
 
     // line thickness: thinner toward tip (scales with envelope)
-    float thick = 0.013 + b * .05;
+    float thick = 0.04 + b * .05;
 
     float fade = smoothstep(0, .1, u);
 
@@ -107,13 +107,13 @@ vec3 rayColour(vec2 p, float rayAngle, float b, float m) {
     float t = iTime;
 
     // R channel: slightly lower frequency, offset to one side
-    float rVal = waveLine(u, v, 4.2, t * 0.9,           -1.0, b, rayAngle);
+    float rVal = waveLine(u + sin(iTime) * .05, v, 4.2, t * 0.9,           -1.0, b, rayAngle);
 
     // G channel: medium frequency, centred
     float gVal = waveLine(u, v, 5.0, t * 0.85 + 0.7,     0.0, b, rayAngle);
 
     // B channel: slightly higher frequency, offset to other side
-    float bVal = waveLine(u, v, 5.8, t * 0.95 + 1.8,     1.0, b, rayAngle);
+    float bVal = waveLine(u, v + sin(iTime) * .05, 5.8, t * 0.95 + 1.8,     1.0, b, rayAngle);
 
     float average = max(max(rVal, gVal), bVal);
     float whitening = 0;

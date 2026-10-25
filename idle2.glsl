@@ -28,14 +28,17 @@ void main() {
 
     vec4 col = vec4(0.0, 0.0, 0.0, 1.0);
 
+    float timeScalar = sin(iTime * .2) * 2;
     for (float layer = 0.0; layer < 1.0; layer += 0.1) {
         float amp   = 0.25 + 0.25 * sin(iTime + layer) * (1.0 - layer);
         float freq  = 2.0;
-        float phase = iTime * (1.0 - layer);
-        float thick = 0.01 + 0.001 * pow(abs(p.x), 8.0);
-        vec3  hue   = palette(0.5 * p.x + 1.0 * layer - 0.5 * iTime);
+        float phase = timeScalar * (1.0 - layer);
+        float thick = 0.02 + 0.001 * pow(abs(p.x), 8.0);
+        vec3  hue   = palette(0.5 * p.x + 1.0 * layer - 0.5 * timeScalar);
         col += wave(p, amp, freq, phase, thick, hue);
     }
+    float scalar = (col.r + col.g + col.b) / 3;
+    col*= scalar * scalar * 2;
 
     fragColor = vec4(col.rgb, iAlpha);
 }

@@ -43,11 +43,11 @@ void main(){
     float angle = atan(p.y, p.x) + iTime * 0.5;
     float lines = abs(sin(angle * 3.0));
     float vinyl = lines * exp(-r * 0.4);
-    col += vec3(0.3, 0.3, 0.35) * vinyl * 0.2;
+    col += vec3(0.3, 0.3, 0.35) * vinyl * 0.4;
 
     // vignette
     float vignette = smoothstep(1.60 - b*.2, 2.30 - b*.2, r);
-    col = mix(col, vec3(0.3, 0.3, 0.5), vignette);
+    col = mix(col, vec3(0.3, 0.3, 0.5), vignette * .1);
 
     /* fade the whole overlay with iAlpha */
     fragColor = vec4(col, iAlpha);

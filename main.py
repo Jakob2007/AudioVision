@@ -35,7 +35,11 @@ from qrcode.image.styles.moduledrawers.pil import RoundedModuleDrawer
 
 DO_LYRIC_FETCHING = True
 
-# ! Check if queue actually works
+# ! wenn lyrics nicht da gibt noch fehler sonst lyrics gefixt
+# Todo: logger einrichten
+# TODO: idle 1 zu zum laufen bringen
+# https://www.shadertoy.com/view/lflGRS
+# 
 
 """
 TODO:
@@ -126,8 +130,12 @@ class LrcManager:
         self.running = False
         self.timer_thread.join(timeout=1)
 
-    def id(self, track_name, artist, album, duration_sec):
+    def id(self, track_data):
+        track_name, artist, album, duration_sec = track_data
         return f"{track_name}{artist}{album}{duration_sec}"
+
+    def has_lyrics(self):
+        return len(self.current_lyrics) > 0
 
     def get_lyrics_backup(self, track_name, artist) -> str:
             print("trying backup lyrics")
@@ -143,7 +151,10 @@ class LrcManager:
     
             return result
     
-    def get_lyrics(self, track_name, artist, album, duration_sec) -> list:
+    def get_lyrics(self, track_data) -> list:
+        track_name, artist, album, duration_sec = track_data
+
+        print("getting " + track_name)
         url = "https://lrclib.net/api/get"
         params =  {
             "artist_name"   : artist,
@@ -151,54 +162,60 @@ class LrcManager:
             "album_name"    : album,
             "duration"      : duration_sec
         }
-        result = requests.get(url, params=params)
+        result = requests.get(url, params=params, timeout=1)
         # bsp: "?artist_name=Borislav+Slavov&track_name=I+Want+to+Live&album_name=Baldur%27s+Gate+3+(Original+Game+Soundtrack)&duration=233"
 
         if result.status_code == 200:
             json = result.json()
             raw = json["syncedLyrics"]
         else:
+            print("problem")
             raw = self.get_lyrics_backup(track_name, artist)
-
         try:
+            print("yuhuu " + track_name)
             return list(pylrc.parse(raw))
         except:
             return list()
     
-    def await_lyrics(self, track_name, artist, album, duration_sec, is_queue):
+    def await_lyrics_(self, track_data):
         if not DO_LYRIC_FETCHING: 
             return
 
-        target = self.current_lyrics if not is_queue else self.queued_lyrics
-        target.clear()
+        result = self.get_lyrics(track_data)
 
-        result = self.get_lyrics(track_name, artist, album, duration_sec)
+        tid = self.id(track_data)
 
-        present_id = self.current_id if not is_queue else self.queue_id
+        if tid == self.current_id:
+            print(tid + "to current")
+            self.current_lyrics[:] = result
+        if tid == self.queue_id:
+            print(tid + "to queue")
+            self.queued_lyrics[:] = result
 
-        if self.id(track_name, artist, album, duration_sec) != present_id:
-            # while lyrics were loading another song was started
-            print("scrapped " + track_name)
-            return
+    def await_lyrics(self, track_data):
+        threading.Thread(target=self.await_lyrics_, daemon=True, name="lyric retrival", args=[track_data]).start()
 
-        target.extend(result)
+    def bundle_track_data(self, track_name, artist, album, duration_ms):
+        return (track_name, artist, album, duration_ms // 1000)
 
     def set_current_song(self, track_name, artist, album, duration_ms):
-        duration_sec = duration_ms // 1000
-        id = self.id(track_name, artist, album, duration_sec)
+        track_data = self.bundle_track_data(track_name, artist, album, duration_ms)
+        id = self.id(track_data)
         if id == self.current_id:
+            print(track_name + "is current already")
             return
         self.current_id = id
 
         if id == self.queue_id:
-            self.current_lyrics = self.queued_lyrics.copy()
+            print(track_name + " from queue")
+            self.current_lyrics[:] = self.queued_lyrics.copy()
             return
 
-        threading.Thread(target=self.await_lyrics, daemon=True, name="lyric retrival", args=[track_name, artist, album, duration_sec, False]).start()
+        self.await_lyrics(track_data)
     
     def queue_song(self, track_name, artist, album, duration_ms):
-        duration_sec = duration_ms // 1000
-        id = self.id(track_name, artist, album, duration_sec)
+        track_data = self.bundle_track_data(track_name, artist, album, duration_ms)
+        id = self.id(track_data)
         if id == self.queue_id:
             return
         self.queue_id = id
@@ -207,7 +224,7 @@ class LrcManager:
             self.queued_lyrics = self.current_lyrics.copy()
             return
         
-        threading.Thread(target=self.await_lyrics, daemon=True, name="lyric retrival", args=[track_name, artist, album, duration_sec, True]).start()
+        self.await_lyrics(track_data)
 
     def get_line(self):
         if not self.current_lyrics:
@@ -282,7 +299,7 @@ def start_audio_thread(state: AppState) -> threading.Thread:
     hann = windows.hann(CHUNK)
     raw_buffer = deque(maxlen=CHUNK)
 
-    def audio_callback(indata, outdata, frames, time, status):
+    def audio_callback_legacy(indata, outdata, frames, time, status):
         raw_buffer.extend(indata[:, 0])
         if len(raw_buffer) >= CHUNK:
             chunk = np.array(raw_buffer)
@@ -290,10 +307,52 @@ def start_audio_thread(state: AppState) -> threading.Thread:
             log_spec = np.log1p(spectrum)
             normalized = log_spec / (log_spec.max() + 1e-8)
             with state.fft_lock:
-                state.fft_data[:] = state.fft_data * 0.7 + normalized * 0.3
+                state.fft_data[:] = state.fft_data * 0.7 + spectrum * 0.3
         out = indata * state.devices.output_gain
         out = np.clip(out, -1.0, 1.0)
         outdata[:] = out
+
+    def audio_callback(indata, outdata, frames, time, status):
+            raw_buffer.extend(indata[:, 0])
+
+            if len(raw_buffer) >= CHUNK:
+                chunk = np.asarray(raw_buffer, dtype=np.float32)
+
+                # Window
+                data = chunk * hann
+
+                # FFT
+                data = np.abs(np.fft.rfft(data))[:512]
+
+                # Convert to power
+                data = data * data
+
+                # Estimate / maintain noise floor
+                # noise_floor = state.noise_floor
+
+                # Spectral subtraction
+                # data = np.maximum(power - noise_floor * 1.5, 0.0)
+
+                # Back to amplitude
+                data = np.sqrt(data)
+
+                # Log compression
+                data = np.log1p(data)
+
+                # Normalize
+                # data = data / (data.max() + 1e-8)
+                data = data * .1
+
+                # Temporal smoothing
+                with state.fft_lock:
+                    state.fft_data[:] = (
+                        state.fft_data * 0.8 +
+                        data * 0.2
+                    )
+                
+            out = indata * state.devices.output_gain
+            out = np.clip(out, -1.0, 1.0)
+            outdata[:] = out
 
     def run():
         with sd.Stream(
@@ -330,6 +389,7 @@ def start_spotify_thread(state: AppState) -> threading.Thread:
             pb = sp.current_playback()
             # get if playing
             state.devices.set_active(pb is not None and pb.get("is_playing"))
+
             try:
                 if pb and pb["is_playing"]:
                     # get current track
@@ -344,7 +404,7 @@ def start_spotify_thread(state: AppState) -> threading.Thread:
                     state.duration_ms   = track["duration_ms"]
                     state.lyrics.set_time_ms(state.progress_ms)
             except Exception:
-                pass
+                print(Exception)
 
             # ! ?? warum
             # if state.is_new_song:
@@ -353,6 +413,7 @@ def start_spotify_thread(state: AppState) -> threading.Thread:
 
             # get lyrics
             if state.is_new_song:
+                print("new song " + state.track_name)
                 try:
                     state.lyrics.set_current_song(state.track_name, state.artist, state.album, state.duration_ms)
                 except Exception:
@@ -400,6 +461,24 @@ class Visualizer(mglw.WindowConfig):
     state: AppState = None
     song_transition_time_ms: int = 2000
 
+    def key_binds_dump(self):
+        # current keys: esc, q, e, r, i, a, s, d, f, space, n, j, o
+        print(" --- HOTKEYS ---")
+        print(" Esc:    close")
+        print(" Q:      previous shader")
+        print(" E:      next shader")
+        print(" r:      reload shader")
+        print(" 1-9:    shader by index")
+        print(" i:      open/close overlay")
+        print(" a:      decrease gain")
+        print(" d:      increas gain")
+        print(" s:      resest gain")
+        print(" f:      free audio source")
+        print(" space:  pause/play song")
+        print(" n:      next song")
+        print(" j:      set jam url")
+        print(" o:      set divice output")
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
@@ -427,7 +506,7 @@ class Visualizer(mglw.WindowConfig):
         # idle shader
         self.idle_prog = self.ctx.program(
             vertex_shader=self.vert_src,
-            fragment_shader=self.load_file(os.path.join(base_dir, "idle.glsl"))
+            fragment_shader=self.load_file(os.path.join(base_dir, "idle2.glsl"))
         )
 
         # textures
@@ -487,6 +566,12 @@ class Visualizer(mglw.WindowConfig):
 
     def prev_shader(self):
         self.shader_index = (self.shader_index - 1) % len(self.shaders)
+        self.build_program()
+
+    def shader_by_index(self, index):
+        if index > len(self.shaders):
+            return
+        self.shader_index = index - 1
         self.build_program()
 
     # ─── idle alpha ──────────────────────────────────────────────────
@@ -792,7 +877,7 @@ class Visualizer(mglw.WindowConfig):
     def key_event(self, key, action, modifiers):
         if action != self.wnd.keys.ACTION_PRESS:
             return
-
+        
         #close
         if key == self.wnd.keys.ESCAPE:
             self.state.stop_event.set()
@@ -808,6 +893,9 @@ class Visualizer(mglw.WindowConfig):
         elif key == self.wnd.keys.R:
             self.interrupt_info()
             self.reload_shaders()
+        elif self.wnd.keys.NUMBER_1 <= key <= self.wnd.keys.NUMBER_9:
+            digit = key - self.wnd.keys.NUMBER_0
+            self.shader_by_index(digit)
 
         # info
         elif key == self.wnd.keys.I:
@@ -815,6 +903,7 @@ class Visualizer(mglw.WindowConfig):
                 self.interrupt_info()
             else:
                 print(self.state)
+                print(f"has lyrics: {self.state.lyrics.has_lyrics()}")
                 self.state.request_info = True
 
         # gain control

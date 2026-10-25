@@ -26,24 +26,24 @@ void main(){
     vec2 p = (uv * 2.0 - 1.0) * vec2(iRes.x / iRes.y, 1.0);
     float r = length(p);
     float a = atan(p.y, p.x);
-    float b = bass();
+    float b = bass() * 10;
 
     /* ── deformed circle ─────────────────────────────────────────── */
     float wave = 0.0;
     wave += 0.07 * sin(3.0 * a + iTime * 1.2) * b * 2;
-    wave += 0.05 * sin(5.0 * a - iTime * 0.8) * b;
+    wave += 0.05 * sin(5.0 * a - iTime * 0.8) * b * b;
     wave += 0.03 * sin(8.0 * a + iTime * 2.1) * (b * 0.5 + 0.3);
     wave += 0.02 * sin(13.0 * a - iTime * 1.7) * b;
 
     float circleR = 0.48 + wave;
     float dist    = r - circleR;
-    float thick   = 0.012 + 0.018 * b * b + abs(wave * 0.3);
+    float thick   = 0.012 + 0.1 * b * b + abs(wave * 0.3);
     float ring    = 1.0 - smoothstep(0.0, thick, abs(dist));
     float fill    = smoothstep(circleR + thick, circleR * 0.01, r) * 0.05 * b;
 
     float shimmer = sin(a * 4.0 - iTime * 1.5) * 0.5 + 0.5;
     vec3 colA     = vec3(0.20, 0.50, 0.90);
-    vec3 colB     = vec3(9.00, 0.00, 0.30);
+    vec3 colB     = vec3(0.00, 9.00, 0.30);
     vec3 circCol  = mix(colA, colB, shimmer) * (ring + fill);
 
     /* ── composite ───────────────────────────────────────────────── */

@@ -13,7 +13,7 @@ out vec4 fragColor;
 #define PI 3.14159265
 
 float fft(float x){
-    return texture(iFFT, vec2(x, 0.0)).r;
+    return texture(iFFT, vec2(x, 0.0)).r * 10;
 }
 
 float bass(float scalar){
@@ -88,7 +88,7 @@ void main(){
     float thick   = 0.012 + 0.018 * b * b * 20 + abs(wave * 0.3);
     float ring    = 1.0 - smoothstep(0.0, thick, abs(dist));
     // float fill    = smoothstep(circleR + thick, circleR * 0.01, r) * 0.05 * b;
-    float fill    = 0.05 * b;
+    float fill    = 0.1 * b;
 
     float shimmer;
     shimmer = sin(fromTop * 4.0 - iTime * 3.0) * 0.5 + 0.5;
