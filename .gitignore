@@ -7,3 +7,4 @@
 *.env
 
 *.spotify_cache
+*.vscode

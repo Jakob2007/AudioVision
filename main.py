@@ -33,6 +33,8 @@ from qrcode.image.styledpil import StyledPilImage
 from qrcode.image.styles.colormasks import SolidFillColorMask
 from qrcode.image.styles.moduledrawers.pil import RoundedModuleDrawer
 
+import termcolor
+
 DO_LYRIC_FETCHING = True
 
 # ! wenn lyrics nicht da gibt noch fehler sonst lyrics gefixt
@@ -51,6 +53,11 @@ lrclib lyrics integrieren
 do sth with spotify beat detection (depricated?)
 include jam link (has to be typed in)
 """
+
+def non_critical_error(text):
+    print("")
+    print(termcolor.colored(text, "red"))
+    print("")
 
 class SystemDeviceManager:
     ROUTER = "BlackHole 2ch"
@@ -83,13 +90,15 @@ class SystemDeviceManager:
             self.active = val
 
     def toggle_free(self):
-        self.active = not self.active
-        if self.active:
-            self.active_lock = False
-            self.set_system_output_device(self.ROUTER)
-        else:
+        if self.active and not self.active_lock:
             self.active_lock = True
+            self.active = False
             self.set_system_output_device(self.default_device_name)
+        elif not self.active:
+            self.active = True
+            self.set_system_output_device(self.ROUTER)
+        elif self.active and self.active_lock:
+            self.active_lock = False
 
     def close(self):
         print("closing to " + self.default_device_name)
@@ -152,6 +161,10 @@ class LrcManager:
             return result
     
     def get_lyrics(self, track_data) -> list:
+        global DO_LYRIC_FETCHING
+        if not DO_LYRIC_FETCHING: 
+            return
+        
         track_name, artist, album, duration_sec = track_data
 
         print("getting " + track_name)
@@ -162,25 +175,29 @@ class LrcManager:
             "album_name"    : album,
             "duration"      : duration_sec
         }
-        result = requests.get(url, params=params, timeout=1)
+        try:
+            result = requests.get(url, params=params, timeout=1)
+        except TimeoutError:
+            non_critical_error("lrclib time out")
+            print("lyrics will not be available for rest of session")
+            DO_LYRIC_FETCHING = False
+            return
         # bsp: "?artist_name=Borislav+Slavov&track_name=I+Want+to+Live&album_name=Baldur%27s+Gate+3+(Original+Game+Soundtrack)&duration=233"
 
         if result.status_code == 200:
             json = result.json()
             raw = json["syncedLyrics"]
         else:
-            print("problem")
+            non_critical_error("try backup to " + track_name)
             raw = self.get_lyrics_backup(track_name, artist)
         try:
-            print("yuhuu " + track_name)
+            print("found lyrics to" + track_name)
             return list(pylrc.parse(raw))
         except:
+            non_critical_error("could not pass lyrics to " + track_name)
             return list()
     
     def await_lyrics_(self, track_data):
-        if not DO_LYRIC_FETCHING: 
-            return
-
         result = self.get_lyrics(track_data)
 
         tid = self.id(track_data)
@@ -193,6 +210,9 @@ class LrcManager:
             self.queued_lyrics[:] = result
 
     def await_lyrics(self, track_data):
+        if not DO_LYRIC_FETCHING: 
+            return
+        
         threading.Thread(target=self.await_lyrics_, daemon=True, name="lyric retrival", args=[track_data]).start()
 
     def bundle_track_data(self, track_name, artist, album, duration_ms):
@@ -200,13 +220,13 @@ class LrcManager:
 
     def set_current_song(self, track_name, artist, album, duration_ms):
         track_data = self.bundle_track_data(track_name, artist, album, duration_ms)
-        id = self.id(track_data)
-        if id == self.current_id:
+        tid = self.id(track_data)
+        if tid and tid == self.current_id:
             print(track_name + "is current already")
             return
-        self.current_id = id
+        self.current_id = tid
 
-        if id == self.queue_id:
+        if tid and tid == self.queue_id:
             print(track_name + " from queue")
             self.current_lyrics[:] = self.queued_lyrics.copy()
             return
@@ -215,12 +235,12 @@ class LrcManager:
     
     def queue_song(self, track_name, artist, album, duration_ms):
         track_data = self.bundle_track_data(track_name, artist, album, duration_ms)
-        id = self.id(track_data)
-        if id == self.queue_id:
+        tid = self.id(track_data)
+        if tid == self.queue_id:
             return
-        self.queue_id = id
+        self.queue_id = tid
         
-        if id == self.current_id:
+        if tid and tid == self.current_id:
             self.queued_lyrics = self.current_lyrics.copy()
             return
         
@@ -378,15 +398,23 @@ def start_spotify_thread(state: AppState) -> threading.Thread:
             scope="user-read-playback-state user-modify-playback-state",
             cache_path=".spotify_cache",
         ))
-    except:
-        print("Spotify failed")
+    except Exception as e:
+        non_critical_error("Spotify login failed")
+        state.stop_event.set()
 
     state.spotify_api = sp
 
+    def run_sp(sp_func):
+        try:
+            return sp_func()
+        except Exception as e:
+            non_critical_error(f"Spotify api failed, func: {sp_func}")
+            state.stop_event.set()
+            return None
+
     def run():
         while not state.stop_event.is_set() and sp:
-            pb = None
-            pb = sp.current_playback()
+            pb = run_sp(sp.current_playback)
             # get if playing
             state.devices.set_active(pb is not None and pb.get("is_playing"))
 
