@@ -55,9 +55,7 @@ include jam link (has to be typed in)
 """
 
 def non_critical_error(text):
-    print("")
-    print(termcolor.colored(text, "red"))
-    print("")
+    print(" > " + termcolor.colored(text, "red"))
 
 class SystemDeviceManager:
     ROUTER = "BlackHole 2ch"
@@ -147,7 +145,6 @@ class LrcManager:
         return len(self.current_lyrics) > 0
 
     def get_lyrics_backup(self, track_name, artist) -> str:
-            print("trying backup lyrics")
             # inacurate due to differen version of songs, duration can not be passed
             # * Handle few cases where there is word timestamps (enhanced=True)
             try:
@@ -167,7 +164,6 @@ class LrcManager:
         
         track_name, artist, album, duration_sec = track_data
 
-        print("getting " + track_name)
         url = "https://lrclib.net/api/get"
         params =  {
             "artist_name"   : artist,
@@ -175,26 +171,38 @@ class LrcManager:
             "album_name"    : album,
             "duration"      : duration_sec
         }
-        try:
-            result = requests.get(url, params=params, timeout=1)
-        except TimeoutError:
-            non_critical_error("lrclib time out")
-            print("lyrics will not be available for rest of session")
-            DO_LYRIC_FETCHING = False
-            return
+
         # bsp: "?artist_name=Borislav+Slavov&track_name=I+Want+to+Live&album_name=Baldur%27s+Gate+3+(Original+Game+Soundtrack)&duration=233"
+        result = None
+        try:
+            result = requests.get(url, params=params, timeout=5)
+        except requests.exceptions.ReadTimeout:
+            non_critical_error("lrclib timeout")
+
+        if result is None or result.status_code == 503:
+            time.sleep(10)
+            try:
+                result = requests.get(url, params=params, timeout=5)
+            except requests.exceptions.ReadTimeout:
+                non_critical_error("lrclib timeout long")
+
+        if result.status_code == 404:
+            non_critical_error("lyric on lrclib not found for " + track_name)
 
         if result.status_code == 200:
             json = result.json()
             raw = json["syncedLyrics"]
         else:
-            non_critical_error("try backup to " + track_name)
+            non_critical_error("try backup for " + track_name)
             raw = self.get_lyrics_backup(track_name, artist)
+            if not raw:
+                non_critical_error("backup failed")
+                return list()
+        
         try:
-            print("found lyrics to" + track_name)
             return list(pylrc.parse(raw))
         except:
-            non_critical_error("could not pass lyrics to " + track_name)
+            non_critical_error("could not parse lyrics to " + track_name)
             return list()
     
     def await_lyrics_(self, track_data):
@@ -203,10 +211,10 @@ class LrcManager:
         tid = self.id(track_data)
 
         if tid == self.current_id:
-            print(tid + "to current")
+            print(tid + " to current")
             self.current_lyrics[:] = result
         if tid == self.queue_id:
-            print(tid + "to queue")
+            print(tid + " to queue")
             self.queued_lyrics[:] = result
 
     def await_lyrics(self, track_data):
@@ -418,49 +426,38 @@ def start_spotify_thread(state: AppState) -> threading.Thread:
             # get if playing
             state.devices.set_active(pb is not None and pb.get("is_playing"))
 
-            try:
-                if pb and pb["is_playing"]:
-                    # get current track
-                    track = pb["item"]
-                    new_track_id        = track["id"]
-                    state.is_new_song   = new_track_id != state.track_id
-                    state.track_id      = new_track_id
-                    state.track_name    = track["name"]
-                    state.artist        = track["artists"][0]["name"]
-                    state.progress_ms   = pb["progress_ms"]
-                    state.album         = track["album"]["name"]
-                    state.duration_ms   = track["duration_ms"]
-                    state.lyrics.set_time_ms(state.progress_ms)
-            except Exception:
-                print(Exception)
+            # basic info
+            if pb and pb["is_playing"]:
+                # get current track
+                track = pb["item"]
+                new_track_id        = track["id"]
+                state.is_new_song   = new_track_id != state.track_id
+                state.track_id      = new_track_id
 
-            # ! ?? warum
-            # if state.is_new_song:
-            #     state.request_upcoming_data = False
-            #     state.next_track_name = None
+                state.track_name    = track["name"]
+                state.artist        = track["artists"][0]["name"]
+                state.progress_ms   = pb["progress_ms"]
+                state.album         = track["album"]["name"]
+                state.duration_ms   = track["duration_ms"]
+                state.lyrics.set_time_ms(state.progress_ms)
 
             # get lyrics
             if state.is_new_song:
-                print("new song " + state.track_name)
-                try:
-                    state.lyrics.set_current_song(state.track_name, state.artist, state.album, state.duration_ms)
-                except Exception:
-                    pass
+                print(termcolor.colored(" * new song " + state.track_name, "cyan"))
+                state.lyrics.set_current_song(state.track_name, state.artist, state.album, state.duration_ms)
 
             # get upcoming track data
-            if not state.next_track_name or state.next_track_name == state.track_name or state.request_upcoming_data:
-                duration = 0
-                try:
-                    queue = sp.queue()
-                    if queue and queue["queue"]:
-                        nxt = queue["queue"][0]
-                        state.next_track_name = nxt["name"]
-                        state.next_artist     = nxt["artists"][0]["name"]
-                        state.next_album      = nxt["album"]["name"]
-                        duration = nxt["duration_ms"]
-                except Exception:
-                    pass
-                if state.next_track_name:
+            if not state.next_track_name or state.is_new_song or state.request_upcoming_data:
+                # request_upcoming_data: queue could have changed so just in case before song ends everything is rerequested
+                
+                queue = run_sp(sp.queue)
+                if queue and queue["queue"]:
+                    nxt = queue["queue"][0]
+                    state.next_track_name = nxt["name"]
+                    state.next_artist     = nxt["artists"][0]["name"]
+                    state.next_album      = nxt["album"]["name"]
+                    duration = nxt["duration_ms"]
+
                     state.lyrics.queue_song(state.next_track_name, state.next_artist, state.next_album, duration)
 
             # * depricated
@@ -976,6 +973,11 @@ class Visualizer(mglw.WindowConfig):
 # ── Einstiegspunkt ────────────────────────────────────────────────────────────
 
 def main():
+
+    print()
+    print(termcolor.colored(" RUN OF AUDIO VISION", "light_cyan"))
+    print()
+
     state = AppState()
 
     state.devices = SystemDeviceManager()
