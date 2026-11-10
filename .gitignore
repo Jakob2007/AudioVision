@@ -8,3 +8,4 @@
 
 *.spotify_cache
 *.vscode
+*.DS_Store

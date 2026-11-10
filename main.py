@@ -23,7 +23,7 @@ import moderngl_window as mglw
 from PIL import Image, ImageDraw, ImageFont
 
 import pylrc
-import syncedlyrics as sl
+import syncedlyrics
 
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
@@ -36,6 +36,7 @@ from qrcode.image.styles.moduledrawers.pil import RoundedModuleDrawer
 import termcolor
 
 DO_LYRIC_FETCHING = True
+DEAFULT_GAIN = 1
 
 # ! wenn lyrics nicht da gibt noch fehler sonst lyrics gefixt
 # Todo: logger einrichten
@@ -59,7 +60,7 @@ def non_critical_error(text):
 
 class SystemDeviceManager:
     ROUTER = "BlackHole 2ch"
-    DEAFULT_GAIN = 1.7
+    
 
     def __init__(self):
         import sounddevice as sd
@@ -70,7 +71,6 @@ class SystemDeviceManager:
         self.audio_switch_path: str = os.path.join(os.path.dirname(os.path.realpath(__file__)), "SwitchAudio")
         self.all_devices = sd.query_devices()
 
-        self.output_gain: float = self.DEAFULT_GAIN
         default_output_index = sd.default.device[1]
         if default_output_index is not None:
             self.default_device_name = sd.query_devices(default_output_index)["name"]
@@ -148,7 +148,7 @@ class LrcManager:
             # inacurate due to differen version of songs, duration can not be passed
             # * Handle few cases where there is word timestamps (enhanced=True)
             try:
-                result = sl.search(f"{track_name} {artist}", enhanced=False, synced_only=True)
+                result = syncedlyrics.search(f"{track_name} {artist}", enhanced=False, synced_only=True)
             except:
                 return ""
 
@@ -281,6 +281,9 @@ class AppState:
     devices: SystemDeviceManager  = None
     lyrics: LrcManager            = None
 
+    audio_gain  = DEAFULT_GAIN
+    fft_gain    = 1
+
     is_new_song: bool = True
 
     track_name:  str = ""
@@ -327,18 +330,18 @@ def start_audio_thread(state: AppState) -> threading.Thread:
     hann = windows.hann(CHUNK)
     raw_buffer = deque(maxlen=CHUNK)
 
-    def audio_callback_legacy(indata, outdata, frames, time, status):
-        raw_buffer.extend(indata[:, 0])
-        if len(raw_buffer) >= CHUNK:
-            chunk = np.array(raw_buffer)
-            spectrum = np.abs(np.fft.rfft(chunk * hann))[:512]
-            log_spec = np.log1p(spectrum)
-            normalized = log_spec / (log_spec.max() + 1e-8)
-            with state.fft_lock:
-                state.fft_data[:] = state.fft_data * 0.7 + spectrum * 0.3
-        out = indata * state.devices.output_gain
-        out = np.clip(out, -1.0, 1.0)
-        outdata[:] = out
+    # def audio_callback_legacy(indata, outdata, frames, time, status):
+    #     raw_buffer.extend(indata[:, 0])
+    #     if len(raw_buffer) >= CHUNK:
+    #         chunk = np.array(raw_buffer)
+    #         spectrum = np.abs(np.fft.rfft(chunk * hann))[:512]
+    #         log_spec = np.log1p(spectrum)
+    #         normalized = log_spec / (log_spec.max() + 1e-8)
+    #         with state.fft_lock:
+    #             state.fft_data[:] = state.fft_data * 0.7 + spectrum * 0.3
+    #     out = indata * state.audio_gain
+    #     out = np.clip(out, -1.0, 1.0)
+    #     outdata[:] = out
 
     def audio_callback(indata, outdata, frames, time, status):
             raw_buffer.extend(indata[:, 0])
@@ -346,39 +349,30 @@ def start_audio_thread(state: AppState) -> threading.Thread:
             if len(raw_buffer) >= CHUNK:
                 chunk = np.asarray(raw_buffer, dtype=np.float32)
 
-                # Window
-                data = chunk * hann
-
                 # FFT
-                data = np.abs(np.fft.rfft(data))[:512]
-
-                # Convert to power
-                data = data * data
-
-                # Estimate / maintain noise floor
-                # noise_floor = state.noise_floor
-
-                # Spectral subtraction
-                # data = np.maximum(power - noise_floor * 1.5, 0.0)
-
-                # Back to amplitude
-                data = np.sqrt(data)
+                data = np.abs(np.fft.rfft(chunk * hann))[:512]
 
                 # Log compression
                 data = np.log1p(data)
 
-                # Normalize
+                # Normalize + gain
                 # data = data / (data.max() + 1e-8)
-                data = data * .1
+                data*= (.1 * state.fft_gain)
 
                 # Temporal smoothing
-                with state.fft_lock:
-                    state.fft_data[:] = (
-                        state.fft_data * 0.8 +
-                        data * 0.2
-                    )
+                if state.fft_lock.acquire(blocking=False):
+                    try:
+                        state.fft_data *= 0.8
+                        state.fft_data += data * 0.2
+                    finally:
+                        state.fft_lock.release()
+                # with state.fft_lock:
+                #     state.fft_data[:] = (
+                #         state.fft_data * 0.8 +
+                #         data * 0.2
+                #     )
                 
-            out = indata * state.devices.output_gain
+            out = indata * state.audio_gain
             out = np.clip(out, -1.0, 1.0)
             outdata[:] = out
 
@@ -386,7 +380,8 @@ def start_audio_thread(state: AppState) -> threading.Thread:
         with sd.Stream(
             device=(black_hole_index, out_index),
             samplerate=SR,
-            blocksize=1024,
+            blocksize=1024, # variable blocksize
+            latency="low",
             channels=2,
             callback=audio_callback,
         ):
@@ -483,6 +478,7 @@ class Visualizer(mglw.WindowConfig):
     title = "Visualizer"
     gl_version = (4, 1)
     window_size = (1920, 1080)
+    vsync = True
     state: AppState = None
     song_transition_time_ms: int = 2000
 
@@ -933,11 +929,19 @@ class Visualizer(mglw.WindowConfig):
 
         # gain control
         elif key == self.wnd.keys.A:
-            self.state.devices.output_gain -= 0.7
+            self.state.audio_gain/= 1.5
         elif key == self.wnd.keys.S:
-            self.state.devices.output_gain = SystemDeviceManager.DEAFULT_GAIN
+            self.state.audio_gain = DEAFULT_GAIN
         elif key == self.wnd.keys.D:
-            self.state.devices.output_gain += 0.7
+            self.state.audio_gain*= 1.5
+
+        # gain control
+        elif key == self.wnd.keys.Y:
+            self.state.fft_gain/= 1.5
+        elif key == self.wnd.keys.X:
+            self.state.fft_gain = 1
+        elif key == self.wnd.keys.C:
+            self.state.fft_gain*= 1.5
 
         # toggle free
         elif key == self.wnd.keys.F:

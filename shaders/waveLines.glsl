@@ -55,7 +55,7 @@ void main() {
 
     // bass: very slight speed nudge — waves drift a touch faster on kicks
     // kept small so the panning character of the original is fully preserved
-    float speedMod = 1.0 + 0.00012 * b;
+    float speedMod = 1.0 - 0.004 * b;
 
     // treble: sub-pixel horizontal shimmer — readable as texture, not jitter
     float shimmer = 0.006 * tr * sin(18.0 * p.x + iTime * 4.0);
@@ -67,7 +67,7 @@ void main() {
 
         // original amp — only bass adds a whisper of extra breath
         float amp = 0.25 + 0.25 * sin(iTime + layer) * (1.0 - layer)
-                  + 0.4 * b * (1.0 - layer);
+                  + 0.4 * b * (1.0 - layer) + .2 * b;
 
         float freq = 2.0;   // untouched — preserves the slow wave character
 
