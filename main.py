@@ -629,7 +629,7 @@ class Visualizer(mglw.WindowConfig):
         # idle shader
         self.idle_prog = self.ctx.program(
             vertex_shader=self.vert_src,
-            fragment_shader=self.load_file(os.path.join(base_dir, "idle2.glsl"))
+            fragment_shader=self.load_file(os.path.join(base_dir, "idle.glsl"))
         )
 
         # textures

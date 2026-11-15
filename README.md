@@ -13,6 +13,8 @@ Spotify login needed.
 
 [Spotify api](https://developer.spotify.com/dashboard) is used for meta data fetching. Most funktionallity can be used without web api and only uses the [Spotify application sdk](https://gist.github.com/zfarbp/581ce7e50a1b5740b4d31f007cac87fb).
 
+Uses [switchaudio-osx](https://github.com/deweller/switchaudio-osx), already included
+
 Shaders can be edited and added on the fly.
 
 ## Controlls:
