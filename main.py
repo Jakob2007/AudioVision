@@ -39,22 +39,10 @@ DO_LYRIC_FETCHING = True
 
 DEAFULT_GAIN = 1
 
-# ! wenn lyrics nicht da gibt noch fehler sonst lyrics gefixt
-# Todo: logger einrichten
-# TODO: idle 1 zu zum laufen bringen
+
+# inspo:
 # https://www.shadertoy.com/view/lflGRS
-# 
 
-"""
-TODO:
-
-song cover animation von https://itunes.apple.com/search?term=Radiohead+Creep&entity=song&limit=1 
-lyric display
-(js texts)
-lrclib lyrics integrieren
-do sth with spotify beat detection (depricated?)
-include jam link (has to be typed in)
-"""
 
 def non_critical_error(text):
     print(" > " + termcolor.colored(text, "red"))
@@ -62,7 +50,6 @@ def non_critical_error(text):
 class SystemDeviceManager:
     ROUTER = "BlackHole 2ch"
     
-
     def __init__(self):
         import sounddevice as sd
 
