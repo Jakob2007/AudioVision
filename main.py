@@ -483,7 +483,7 @@ def start_spotify_web_thread(state: AppState) -> threading.Thread:
 # include artwork
 # debug and check
 def start_spotify_thread(state: AppState) -> threading.Thread:
-    SP_CALL_TIME_LOCAL = .5
+    SP_CALL_TIME_LOCAL = 1
 
     # Spotify application exists
     res = subprocess.run(["test", "-d", "/Applications/Spotify.app"], capture_output=True)
