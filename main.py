@@ -36,6 +36,7 @@ from qrcode.image.styles.moduledrawers.pil import RoundedModuleDrawer
 import termcolor
 
 DO_LYRIC_FETCHING = True
+
 DEAFULT_GAIN = 1
 
 # ! wenn lyrics nicht da gibt noch fehler sonst lyrics gefixt
@@ -271,6 +272,9 @@ class LrcManager:
 
 # ── Shared State ─────────────────────────────────────────────────────────────
 
+def placeholder_func() -> None:
+    raise NotImplementedError("The function was not implemented")
+
 @dataclass
 class AppState:
     fft_data:    np.ndarray       = field(default_factory=lambda: np.zeros(512))
@@ -294,6 +298,9 @@ class AppState:
     spotify_volume: int = 50
     duration_ms: int = 0
     progress_ms: int = 0
+
+    playpause_switch    = placeholder_func
+    next_trigger        = placeholder_func
 
     request_upcoming_data: bool = False
     next_track_name:  str = ""
@@ -394,7 +401,7 @@ def start_audio_thread(state: AppState) -> threading.Thread:
 
 # ── Spotify Thread ────────────────────────────────────────────────────────────
 
-def start_spotify_thread(state: AppState) -> threading.Thread:
+def start_spotify_web_thread(state: AppState) -> threading.Thread:
     sp = None
     try:
         sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
@@ -402,10 +409,11 @@ def start_spotify_thread(state: AppState) -> threading.Thread:
             cache_path=".spotify_cache",
         ))
     except Exception as e:
-        non_critical_error("Spotify login failed")
+        non_critical_error(f"Spotify login failed -> {e}")
         state.stop_event.set()
 
-    state.spotify_api = sp
+    state.playpause_switch = lambda: sp.pause_playback() if sp.current_playback()["is_playing"] else sp.start_playback()
+    state.next_trigger = lambda: sp.next_track()                    
 
     def run_sp(sp_func):
         try:
@@ -466,6 +474,113 @@ def start_spotify_thread(state: AppState) -> threading.Thread:
             #         pass
 
             state.stop_event.wait(timeout=1.0)
+
+    t = threading.Thread(target=run, daemon=True, name="spotify")
+    t.start()
+    return t
+
+# !
+# include artwork
+# debug and check
+def start_spotify_thread(state: AppState) -> threading.Thread:
+    SP_CALL_TIME_LOCAL = .5
+
+    # Spotify application exists
+    res = subprocess.run(["test", "-d", "/Applications/Spotify.app"], capture_output=True)
+    if res.returncode == 1:
+        non_critical_error("Spotify application not installed, try web api")
+        return start_spotify_web_thread(AppState)
+
+    application_running = lambda: subprocess.run(["pgrep", "-x", "Spotify"], capture_output=True).returncode == 0
+
+    # Spotify running
+    if not application_running():
+        subprocess.run(["open", "-g", "-a" "Spotify.app"])
+        for _ in range(0,5,0.1):
+            if state.stop_event.is_set():
+                return None
+            if application_running():
+                break
+            time.sleep(.1)
+        else:
+            non_critical_error("Launching Spotify application failed, try web api")
+            return start_spotify_web_thread(AppState)
+
+    def run_sp(cmd: str):
+        res = subprocess.run(["osascript", "-e", f'tell application "Spotify" to {cmd}'], capture_output=True)
+        if res.returncode == 1 or res.stderr != b'':
+            non_critical_error(f"Could not run '{cmd}' -> {res.returncode}; {res.stderr}")
+            return ""
+        return res.stdout.decode("utf-8").strip()
+
+    state.playpause_switch = lambda: run_sp("playpause")
+    state.next_trigger = lambda: run_sp("next track")
+
+    # Web api
+    web_api = None
+    try:
+        web_api = spotipy.Spotify(auth_manager=SpotifyOAuth(
+            scope="user-read-playback-state user-modify-playback-state",
+            cache_path=".spotify_cache",
+        ))
+    except Exception as e:
+        non_critical_error(f"Spotify login failed -> {e}, resuming without web methods")
+
+    def run_web_sp(sp_func):
+        if web_api is None:
+            return None
+        try:
+            return sp_func()
+        except Exception as e:
+            non_critical_error(f"Spotify api failed, func: {sp_func}")
+            state.stop_event.set()
+            return None  
+
+    def run():
+        # https://gist.github.com/zfarbp/581ce7e50a1b5740b4d31f007cac87fb
+        while not state.stop_event.is_set() and application_running():
+            # get if playing
+            state.devices.set_active(run_sp("player state") == "playing")
+
+            # is new track
+            new_track_id = run_sp("id of current track")
+            state.is_new_song   = new_track_id != state.track_id
+            state.track_id = new_track_id
+
+            # progress
+            state.progress_ms   = int(float(run_sp("player position")) * 1000)
+            state.lyrics.set_time_ms(state.progress_ms)            
+
+            # new song
+            if state.is_new_song:
+                # basic info
+                state.track_name    = run_sp("name of current track")
+                state.artist        = run_sp("artist of current track")
+                state.album         = run_sp("album of current track")
+                state.duration_ms   = float(run_sp("duration of current track"))
+                # state.cover_art     = run_sp("artwork url of current track")
+
+                # get lyrics
+                state.lyrics.set_current_song(state.track_name, state.artist, state.album, state.duration_ms)
+
+                # log
+                print(termcolor.colored(" * new song " + state.track_name, "cyan"))
+
+            # get upcoming track data
+            if not state.next_track_name or state.is_new_song or state.request_upcoming_data:
+                # request_upcoming_data trigger when track about to end: queue could have changed so just in case before song ends everything is rerequested
+                
+                queue = run_web_sp(web_api.queue)
+                if queue and queue["queue"]:
+                    nxt = queue["queue"][0]
+                    state.next_track_name = nxt["name"]
+                    state.next_artist     = nxt["artists"][0]["name"]
+                    state.next_album      = nxt["album"]["name"]
+                    duration = nxt["duration_ms"]
+
+                    state.lyrics.queue_song(state.next_track_name, state.next_artist, state.next_album, duration)
+
+            state.stop_event.wait(timeout=SP_CALL_TIME_LOCAL)
 
     t = threading.Thread(target=run, daemon=True, name="spotify")
     t.start()
@@ -954,21 +1069,15 @@ class Visualizer(mglw.WindowConfig):
         # spotify control
         elif key == self.wnd.keys.SPACE:
             try:
-                sp = self.state.spotify_api
-                is_playing = sp.current_playback()["is_playing"]
-                if is_playing:
-                    sp.pause_playback()
-                else:
-                    sp.start_playback()
+                self.state.playpause_switch()
             except Exception:
-                pass
+                non_critical_error("Spotify playpause failed")
         elif key == self.wnd.keys.N:
             try:
-                sp = self.state.spotify_api
-                sp.next_track()
+                self.state.next_trigger()
                 self.trigger_info()
             except Exception:
-                pass
+                non_critical_error("Spotify next failed")
         
         # jam control
         elif key == self.wnd.keys.J:
